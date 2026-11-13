@@ -28,7 +28,10 @@ sns.set_palette("husl")
 
 ## 4.2. Cargar archivos fuente (Trademap)
 
-```
+import pandas as pd
+from google.colab import files
+import re
+
 # Subir archivo Excel directamente desde TradeMap
 uploaded = files.upload()
 filename = list(uploaded.keys())[0]
@@ -36,42 +39,71 @@ filename = list(uploaded.keys())[0]
 # Leer datos tal como vienen de TradeMap
 df_raw = pd.read_excel(filename, sheet_name=0)
 
-# Verificar estructura original
-print("Columnas disponibles:", df_raw.columns.tolist())
-print("\nPrimeras 5 filas:")
-print(df_raw.head())
+print(f"📁 Archivo cargado exitosamente: {filename}")
+print(f"📋 Columnas disponibles en el archivo: {list(enumerate(df_raw.columns))}\n")
 
-# Transformar de formato ancho a formato largo (melt)
-# Identificar columnas de años (contienen "Valor importado en")
-year_columns = [col for col in df_raw.columns if 'Valor importado en' in str(col)]
-print(f"\nColumnas de años encontradas: {year_columns}")
+# --- 1. DETECCIÓN AUTOMÁTICA DE LA COLUMNA DE PAÍSES/SOCIOS ---
+posibles_cabeceras_pais = [
+    'exportadores', 'importadores', 'mercados', 'socios', 'país', 'pais',
+    'exporters', 'importers', 'markets', 'partners', 'country', 'countries'
+]
 
-# Preparar datos base
+col_pais = next(
+    (col for col in df_raw.columns if any(palabra in str(col).lower() for palabra in posibles_cabeceras_pais)),
+    None
+)
+
+# --- 2. ASIGNACIÓN MANUAL (FALLBACK) SI LA DETECCIÓN AUTOMÁTICA FALLA ---
+if col_pais is None:
+    print("⚠️ ADVERTENCIA: No se pudo detectar automáticamente la columna de países/socios.")
+    print("Por favor, selecciona manualmente la columna ingresando su número de índice de la lista de arriba:")
+    
+    try:
+        idx_manual = int(input("Ingrese el número de la columna de países: "))
+        col_pais = df_raw.columns[idx_manual]
+        print(f"✅ Columna seleccionada manualmente: '{col_pais}'")
+    except Exception as e:
+        raise ValueError(f"❌ Error en la selección manual. La columna no es válida: {e}")
+else:
+    print(f"✅ Columna de países detectada automáticamente: '{col_pais}'")
+
+# --- 3. DETECCIÓN AUTOMÁTICA DE COLUMNAS DE AÑOS ---
+year_columns = [col for col in df_raw.columns if re.search(r'\b(19|20)\d{2}\b', str(col))]
+
+if not year_columns:
+    print("⚠️ ADVERTENCIA: No se detectaron columnas de años automáticamente.")
+    print("Columnas disponibles:", df_raw.columns.tolist())
+    raise ValueError("❌ No se encontraron columnas de años válidas (19xx o 20xx) en el archivo.")
+
+print(f"✅ Columnas de años detectadas: {year_columns}\n")
+
+# --- 4. TRANSFORMACIÓN Y NORMALIZACIÓN DE DATOS ---
+# Estructura de salida requerida: year, partner_country, trade_value_usd
 df_melted = df_raw.melt(
-    id_vars=['Exportadores'],
+    id_vars=[col_pais],
     value_vars=year_columns,
     var_name='year_column',
     value_name='trade_value_usd'
 )
 
-# Extraer año de la columna
-df_melted['year'] = df_melted['year_column'].str.extract('(\d{4})').astype(int)
-df_melted = df_melted.rename(columns={'Exportadores': 'partner_country'})
+# Extraer el año y renombrar la columna de país
+df_melted['year'] = df_melted['year_column'].str.extract(r'(\d{4})').astype(int)
+df_melted = df_melted.rename(columns={col_pais: 'partner_country'})
 
-# Limpiar datos
+# Limpieza y conversión numérica
 df_melted['trade_value_usd'] = pd.to_numeric(df_melted['trade_value_usd'], errors='coerce')
 df = df_melted[['year', 'partner_country', 'trade_value_usd']].copy()
 
-# Eliminar filas con datos faltantes y fila "Mundo"
+# Eliminar nulos y filas de totales ("Mundo", "World", "Total")
 df = df.dropna(subset=['trade_value_usd'])
-df = df[df['partner_country'] != 'Mundo'].reset_index(drop=True)
+df = df[~df['partner_country'].astype(str).str.strip().str.lower().isin(['mundo', 'world', 'total'])].reset_index(drop=True)
 
-print(f"\nDatos procesados: {len(df)} filas")
-print(f"Países únicos: {df['partner_country'].nunique()}")
-print(f"Años disponibles: {sorted(df['year'].unique())}")
-print("\nPrimeros datos procesados:")
+# --- 5. RESULTADO FINAL ---
+print(f"📊 Datos procesados correctamente: {len(df)} filas")
+print(f"🌍 Países únicos analizados: {df['partner_country'].nunique()}")
+print(f"📅 Rango de años: {sorted(df['year'].unique())}")
+print("\nPrimeros datos normalizados:")
 print(df.head(10))
-```
 
 ## 4.3. Calcular Market Share, Ranking y aplicar filtros
 
@@ -131,61 +163,158 @@ for year in sorted(df['year'].unique()):
 ## 4.5. Generar Gráficos analíticos
 
 ```
-# Gráficos mejorados con valores
-fig, axes = plt.subplots(2, 2, figsize=(16, 14))
+import ipywidgets as widgets
+from IPython.display import display, clear_output
+import matplotlib.pyplot as plt
+import seaborn as sns
+import pandas as pd
+import re
 
-# Market Share Trends con valores en puntos clave
-pivot_share.plot(kind='line', marker='o', ax=axes[0,0], linewidth=2, markersize=6)
-axes[0,0].set_title('Market Share Evolution (%)', fontsize=14, fontweight='bold')
-axes[0,0].set_ylabel('Market Share (%)')
-axes[0,0].grid(True, alpha=0.3)
-axes[0,0].legend(bbox_to_anchor=(1.05, 1), loc='upper left')
+# ==========================================
+# 1. DEFINICIÓN DE PALETAS PREDETERMINADAS (HEX)
+# ==========================================
+paletas_preset = {
+    "1. Ejecutivo Clásico": ["#1f4e78", "#2e75b6", "#5b9bd5", "#8ea9db", "#b4c6e7", "#d9e1f2"],
+    "2. Comercio Global": ["#134f5c", "#2986cc", "#38761d", "#6aa84f", "#93c47d", "#b6d7a8"],
+    "3. Corporativo Contemporáneo": ["#4a3b32", "#8c6d53", "#c29b7c", "#d9bfa9", "#f2eae1", "#594f43"]
+}
 
-# Añadir valores para Brasil y Colombia (principales)
-for country in ['Brasil', 'Colombia']:
-    if country in pivot_share.columns:
-        for year in pivot_share.index:
-            value = pivot_share.loc[year, country]
-            if not pd.isna(value):
-                axes[0,0].annotate(f'{value:.1f}%',
-                                 (year, value),
-                                 textcoords="offset points",
-                                 xytext=(0,10),
-                                 ha='center', fontsize=8)
+# Widgets de la interfaz interactiva
+selector_paleta = widgets.Dropdown(
+    options=list(paletas_preset.keys()) + ["4. Personalizada (CSS)"],
+    value="1. Ejecutivo Clásico",
+    description='🎨 Paleta:',
+    style={'description_width': 'initial'}
+)
 
-# Trade Value Evolution
-(pivot_value/1000).plot(kind='line', marker='s', ax=axes[0,1], linewidth=2, markersize=6)
-axes[0,1].set_title('Trade Value Evolution (Million USD)', fontsize=14, fontweight='bold')
-axes[0,1].set_ylabel('Million USD')
-axes[0,1].grid(True, alpha=0.3)
+input_css = widgets.Textarea(
+    value='',
+    placeholder='Pega aquí tu código CSS de Coolors (ej: --olive-wood: #7a6c5df; ...)',
+    description='Código CSS:',
+    disabled=True,
+    layout=widgets.Layout(width='100%', height='100px')
+)
 
-# Market Share actual con valores
-latest_year = df['year'].max()
-latest_data = market_evolution_top[market_evolution_top['year'] == latest_year].nlargest(8, 'market_share')
-bars = latest_data.set_index('partner_country')['market_share'].plot(kind='bar', ax=axes[1,0], color='skyblue')
-axes[1,0].set_title(f'Market Share {latest_year} (%)', fontsize=14, fontweight='bold')
-axes[1,0].set_ylabel('Market Share (%)')
-axes[1,0].tick_params(axis='x', rotation=45)
+boton_generar = widgets.Button(
+    description='Aplicar Paleta y Generar Gráficos',
+    button_style='success',
+    icon='check',
+    layout=widgets.Layout(width='250px', height='40px')
+)
 
-# Añadir valores encima de las barras
-for i, (country, value) in enumerate(latest_data.set_index('partner_country')['market_share'].items()):
-    axes[1,0].text(i, value + 0.5, f'{value:.1f}%', ha='center', va='bottom', fontsize=9)
+output_graficos = widgets.Output()
 
-# CAGR con valores
-bars2 = growth_data.set_index('partner_country')['cagr'].plot(kind='bar', ax=axes[1,1], color='lightcoral')
-axes[1,1].set_title('CAGR % (Compound Annual Growth Rate)', fontsize=14, fontweight='bold')
-axes[1,1].set_ylabel('CAGR (%)')
-axes[1,1].tick_params(axis='x', rotation=45)
-axes[1,1].axhline(y=0, color='black', linestyle='-', alpha=0.3)
+# Habilitar o deshabilitar caja de texto según selección
+fn_cambiar = lambda change: setattr(input_css, 'disabled', change['new'] != "4. Personalizada (CSS)")
+selector_paleta.observe(fn_cambiar, names='value')
 
-# Añadir valores encima de las barras
-for i, (country, value) in enumerate(growth_data.set_index('partner_country')['cagr'].items()):
-    axes[1,1].text(i, value + 0.5 if value > 0 else value - 1, f'{value:.1f}%',
-                   ha='center', va='bottom' if value > 0 else 'top', fontsize=9)
+# ==========================================
+# 2. FUNCIÓN QUE GENERA LOS 4 GRÁFICOS AL HACER CLIC
+# ==========================================
+def al_hacer_clic_generar(b):
+    with output_graficos:
+        clear_output()
+        
+        # Obtener paleta seleccionada
+        opcion = selector_paleta.value
+        if opcion != "4. Personalizada (CSS)":
+            colores_activos = paletas_preset[opcion]
+            print(f"✅ Paleta aplicada: '{opcion}'")
+        else:
+            css_text = input_css.value.strip()
+            if not css_text:
+                print("⚠️ ADVERTENCIA: La caja de CSS está vacía. Usando paleta por defecto.")
+                colores_activos = paletas_preset["1. Ejecutivo Clásico"]
+            else:
+                hex_brutos = re.findall(r'#([A-Fa-f0-9]{8}|[A-Fa-f0-9]{6})', css_text)
+                if not hex_brutos:
+                    print("❌ ERROR: No se encontraron colores HEX válidos en el texto. Usando paleta por defecto.")
+                    colores_activos = paletas_preset["1. Ejecutivo Clásico"]
+                else:
+                    hex_limpios = [f"#{h[:6].lower()}" for h in hex_brutos]
+                    colores_activos = list(dict.fromkeys(hex_limpios))
+                    print(f"✅ ¡Código CSS procesado con éxito! ({len(colores_activos)} colores extraídos)")
 
-plt.tight_layout()
-plt.show()
-```
+        # Aplicar colores a Seaborn
+        sns.set_theme(style="whitegrid")
+        sns.set_palette(colores_activos)
+        plt.rcParams['figure.figsize'] = (12, 6)
+
+        # Validar existencia del DataFrame 'df' del 4.2
+        if 'df' not in globals():
+            print("❌ ERROR CRÍTICO: No se encuentra el DataFrame 'df'. Asegúrate de ejecutar primero el apartado 4.2.")
+            return
+
+        # --- Gráfico 1: Market Share Trends ---
+        print("\n📊 Generando visualizaciones con la paleta seleccionada...")
+        plt.figure()
+        pivot_trends = df.pivot(index='year', columns='partner_country', values='trade_value_usd').fillna(0)
+        market_share = pivot_trends.div(pivot_trends.sum(axis=1), axis=0) * 100
+
+        for i, col in enumerate(market_share.columns[:len(colores_activos)]):
+            plt.plot(market_share.index, market_share[col], marker='o', linewidth=2.5, color=colores_activos[i % len(colores_activos)], label=col)
+
+        plt.title('Market Share Trends (%) por País Socio', fontsize=14, fontweight='bold')
+        plt.xlabel('Año', fontsize=12)
+        plt.ylabel('Participación de Mercado (%)', fontsize=12)
+        plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
+        plt.tight_layout()
+        plt.show()
+
+        # --- Gráfico 2: Trade Value Evolution ---
+        plt.figure()
+        pivot_trends.iloc[:, :len(colores_activos)].plot(kind='bar', stacked=True, color=colores_activos)
+        plt.title('Trade Value Evolution (USD)', fontsize=14, fontweight='bold')
+        plt.xlabel('Año', fontsize=12)
+        plt.ylabel('Valor Comercial (USD)', fontsize=12)
+        plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
+        plt.tight_layout()
+        plt.show()
+
+        # --- Gráfico 3: Market Share Actual ---
+        plt.figure()
+        ultimo_anio = market_share.index.max()
+        top_actual = market_share.loc[ultimo_anio].nlargest(min(5, len(colores_activos)))
+        plt.pie(top_actual, labels=top_actual.index, colors=colores_activos[:len(top_actual)], autopct='%1.1f%%', startangle=140)
+        plt.title(f'Market Share Actual ({ultimo_anio})', fontsize=14, fontweight='bold')
+        plt.tight_layout()
+        plt.show()
+
+        # --- Gráfico 4: CAGR ---
+        paises_unicos = df['partner_country'].unique()
+        cagr_data = {}
+        for p in paises_unicos:
+            sub = df[df['partner_country'] == p].sort_values('year')
+            if len(sub) >= 2:
+                val_inicial = sub.iloc[0]['trade_value_usd']
+                val_final = sub.iloc[-1]['trade_value_usd']
+                n_anios = sub.iloc[-1]['year'] - sub.iloc[0]['year']
+                if val_inicial > 0 and n_anios > 0:
+                    cagr = ((val_final / val_inicial) ** (1 / n_anios) - 1) * 100
+                    cagr_data[p] = cagr
+
+        if cagr_data:
+            cagr_series = pd.Series(cagr_data).nlargest(min(6, len(colores_activos)))
+            plt.figure()
+            cagr_series.plot(kind='barh', color=colores_activos[:len(cagr_series)])
+            plt.title('CAGR - Crecimiento Anual Compuesto (%) por País', fontsize=14, fontweight='bold')
+            plt.xlabel('Tasa de Crecimiento Anual Compuesta (%)', fontsize=12)
+            plt.ylabel('País', fontsize=12)
+            plt.axvline(0, color='gray', linestyle='--', linewidth=1)
+            plt.tight_layout()
+            plt.show()
+
+boton_generar.on_click(al_hacer_clic_generar)
+
+# Mostrar la interfaz del apartado 4.5
+ui_completa = widgets.VBox([
+    widgets.HTML("<h3>🎨 Sección 4.5: Selección de Paleta y Gráficos Analíticos</h3>"),
+    selector_paleta, 
+    input_css, 
+    boton_generar, 
+    output_graficos
+])
+display(ui_completa)
 
 ## 4.6. Generar Insights estratégicos o "Descubrimientos relevantes" 
 
