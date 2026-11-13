@@ -28,6 +28,8 @@ sns.set_palette("husl")
 
 ## 4.2. Cargar archivos fuente (Trademap)
 
+```
+
 import pandas as pd
 from google.colab import files
 import re
@@ -104,6 +106,7 @@ print(f"🌍 Países únicos analizados: {df['partner_country'].nunique()}")
 print(f"📅 Rango de años: {sorted(df['year'].unique())}")
 print("\nPrimeros datos normalizados:")
 print(df.head(10))
+```
 
 ## 4.3. Calcular Market Share, Ranking y aplicar filtros
 
@@ -315,6 +318,7 @@ ui_completa = widgets.VBox([
     output_graficos
 ])
 display(ui_completa)
+```
 
 ## 4.6. Generar Insights estratégicos o "Descubrimientos relevantes" 
 
