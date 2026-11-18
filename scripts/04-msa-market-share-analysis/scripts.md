@@ -34,20 +34,28 @@ import pandas as pd
 from google.colab import files
 import re
 
-# Subir archivo Excel directamente desde TradeMap
+# --- 0. CARGA DE ARCHIVO ---
+print("📂 Por favor, seleccione el archivo Excel exportado desde Trade Map:")
 uploaded = files.upload()
 filename = list(uploaded.keys())[0]
 
-# Leer datos tal como vienen de TradeMap
+# Leer datos de la primera hoja
 df_raw = pd.read_excel(filename, sheet_name=0)
 
-print(f"📁 Archivo cargado exitosamente: {filename}")
-print(f"📋 Columnas disponibles en el archivo: {list(enumerate(df_raw.columns))}\n")
+# Limpiar espacios en blanco en los nombres de las columnas
+df_raw.columns = df_raw.columns.astype(str).str.strip()
+
+print(f"\n📁 Archivo cargado exitosamente: {filename}")
+print(f"📋 Columnas disponibles en el archivo:")
+for idx, col in enumerate(df_raw.columns):
+    print(f"  [{idx}] {col}")
+print("-" * 50)
 
 # --- 1. DETECCIÓN AUTOMÁTICA DE LA COLUMNA DE PAÍSES/SOCIOS ---
 posibles_cabeceras_pais = [
     'exportadores', 'importadores', 'mercados', 'socios', 'país', 'pais',
-    'exporters', 'importers', 'markets', 'partners', 'country', 'countries'
+    'exporters', 'importers', 'markets', 'partners', 'country', 'countries',
+    'partner country', 'país socio'
 ]
 
 col_pais = next(
@@ -57,15 +65,20 @@ col_pais = next(
 
 # --- 2. ASIGNACIÓN MANUAL (FALLBACK) SI LA DETECCIÓN AUTOMÁTICA FALLA ---
 if col_pais is None:
-    print("⚠️ ADVERTENCIA: No se pudo detectar automáticamente la columna de países/socios.")
-    print("Por favor, selecciona manualmente la columna ingresando su número de índice de la lista de arriba:")
+    print("\n⚠️ ADVERTENCIA: No se pudo detectar automáticamente la columna de países/socios.")
+    print("Por favor, seleccione manualmente la columna ingresando su número de índice de la lista superior:")
     
-    try:
-        idx_manual = int(input("Ingrese el número de la columna de países: "))
-        col_pais = df_raw.columns[idx_manual]
-        print(f"✅ Columna seleccionada manualmente: '{col_pais}'")
-    except Exception as e:
-        raise ValueError(f"❌ Error en la selección manual. La columna no es válida: {e}")
+    while True:
+        try:
+            idx_manual = int(input("Ingrese el número de la columna de países: "))
+            if 0 <= idx_manual < len(df_raw.columns):
+                col_pais = df_raw.columns[idx_manual]
+                print(f"✅ Columna seleccionada manualmente con éxito: '{col_pais}'")
+                break
+            else:
+                print(f"❌ Error: El índice debe estar entre 0 y {len(df_raw.columns)-1}. Intente de nuevo.")
+        except ValueError:
+            print("❌ Entrada inválida. Por favor, ingrese un número entero válido.")
 else:
     print(f"✅ Columna de países detectada automáticamente: '{col_pais}'")
 
@@ -73,14 +86,13 @@ else:
 year_columns = [col for col in df_raw.columns if re.search(r'\b(19|20)\d{2}\b', str(col))]
 
 if not year_columns:
-    print("⚠️ ADVERTENCIA: No se detectaron columnas de años automáticamente.")
+    print("\n⚠️ ADVERTENCIA: No se detectaron columnas de años automáticamente.")
     print("Columnas disponibles:", df_raw.columns.tolist())
-    raise ValueError("❌ No se encontraron columnas de años válidas (19xx o 20xx) en el archivo.")
+    raise ValueError("❌ No se encontraron columnas de años válidas (formato 19xx o 20xx) en el archivo.")
 
-print(f"✅ Columnas de años detectadas: {year_columns}\n")
+print(f"✅ Columnas de años detectadas ({len(year_columns)} en total): {year_columns}\n")
 
-# --- 4. TRANSFORMACIÓN Y NORMALIZACIÓN DE DATOS ---
-# Estructura de salida requerida: year, partner_country, trade_value_usd
+# --- 4. TRANSFORMACIÓN Y NORMALIZACIÓN DE DATOS (MELT) ---
 df_melted = df_raw.melt(
     id_vars=[col_pais],
     value_vars=year_columns,
@@ -88,23 +100,28 @@ df_melted = df_raw.melt(
     value_name='trade_value_usd'
 )
 
-# Extraer el año y renombrar la columna de país
+# Extraer el año numérico y renombrar la columna de país
 df_melted['year'] = df_melted['year_column'].str.extract(r'(\d{4})').astype(int)
 df_melted = df_melted.rename(columns={col_pais: 'partner_country'})
 
-# Limpieza y conversión numérica
-df_melted['trade_value_usd'] = pd.to_numeric(df_melted['trade_value_usd'], errors='coerce')
+# Limpieza y conversión estricta de valores comerciales a numéricos
+df_melted['trade_value_usd'] = pd.to_numeric(
+    df_melted['trade_value_usd'].astype(str).str.replace(r'[^0-9.\-]', '', regex=True), 
+    errors='coerce'
+)
+
 df = df_melted[['year', 'partner_country', 'trade_value_usd']].copy()
 
 # Eliminar nulos y filas de totales ("Mundo", "World", "Total")
 df = df.dropna(subset=['trade_value_usd'])
-df = df[~df['partner_country'].astype(str).str.strip().str.lower().isin(['mundo', 'world', 'total'])].reset_index(drop=True)
+excluidos = ['mundo', 'world', 'total', 'grand total', 'total general']
+df = df[~df['partner_country'].astype(str).str.strip().str.lower().isin(excluidos)].reset_index(drop=True)
 
-# --- 5. RESULTADO FINAL ---
-print(f"📊 Datos procesados correctamente: {len(df)} filas")
+# --- 5. RESULTADO FINAL Y VERIFICACIÓN ---
+print(f"📊 Datos procesados correctamente: {len(df)} registros resultantes.")
 print(f"🌍 Países únicos analizados: {df['partner_country'].nunique()}")
 print(f"📅 Rango de años: {sorted(df['year'].unique())}")
-print("\nPrimeros datos normalizados:")
+print("\nPrimeros 10 registros normalizados:")
 print(df.head(10))
 ```
 
@@ -182,8 +199,8 @@ paletas_preset = {
     "3. Corporativo Contemporáneo": ["#4a3b32", "#8c6d53", "#c29b7c", "#d9bfa9", "#f2eae1", "#594f43"]
 }
 
-# Widgets de la interfaz interactiva
-selector_paleta = widgets.Dropdown(
+# Widgets de la interfaz interactiva con selección directa (RadioButtons)
+selector_paleta = widgets.RadioButtons(
     options=list(paletas_preset.keys()) + ["4. Personalizada (CSS)"],
     value="1. Ejecutivo Clásico",
     description='🎨 Paleta:',
@@ -192,7 +209,7 @@ selector_paleta = widgets.Dropdown(
 
 input_css = widgets.Textarea(
     value='',
-    placeholder='Pega aquí tu código CSS de Coolors (ej: --olive-wood: #7a6c5df; ...)',
+    placeholder='Pega aquí tu código CSS de Coolors (ej: --primary: #1f4e78; --secondary: #2e75b6; ... o códigos HEX directos)',
     description='Código CSS:',
     disabled=True,
     layout=widgets.Layout(width='100%', height='100px')
@@ -202,14 +219,17 @@ boton_generar = widgets.Button(
     description='Aplicar Paleta y Generar Gráficos',
     button_style='success',
     icon='check',
-    layout=widgets.Layout(width='250px', height='40px')
+    layout=widgets.Layout(width='280px', height='40px')
 )
 
 output_graficos = widgets.Output()
 
-# Habilitar o deshabilitar caja de texto según selección
-fn_cambiar = lambda change: setattr(input_css, 'disabled', change['new'] != "4. Personalizada (CSS)")
-selector_paleta.observe(fn_cambiar, names='value')
+# Habilitar o deshabilitar caja de texto según la selección en los RadioButtons
+def al_cambiar_opcion(change):
+    if change['type'] == 'change' and change['name'] == 'value':
+        input_css.disabled = (change['new'] != "4. Personalizada (CSS)")
+
+selector_paleta.observe(al_cambiar_opcion)
 
 # ==========================================
 # 2. FUNCIÓN QUE GENERA LOS 4 GRÁFICOS AL HACER CLIC
@@ -222,34 +242,36 @@ def al_hacer_clic_generar(b):
         opcion = selector_paleta.value
         if opcion != "4. Personalizada (CSS)":
             colores_activos = paletas_preset[opcion]
-            print(f"✅ Paleta aplicada: '{opcion}'")
+            print(f"✅ Paleta predeterminada aplicada: '{opcion}'")
         else:
             css_text = input_css.value.strip()
             if not css_text:
-                print("⚠️ ADVERTENCIA: La caja de CSS está vacía. Usando paleta por defecto.")
+                print("⚠️ ADVERTENCIA: La caja de código CSS está vacía. Se utilizará la paleta '1. Ejecutivo Clásico' por defecto.")
                 colores_activos = paletas_preset["1. Ejecutivo Clásico"]
             else:
+                # Extraer códigos HEX (soporta formatos de 6 u 8 caracteres)
                 hex_brutos = re.findall(r'#([A-Fa-f0-9]{8}|[A-Fa-f0-9]{6})', css_text)
                 if not hex_brutos:
-                    print("❌ ERROR: No se encontraron colores HEX válidos en el texto. Usando paleta por defecto.")
+                    print("❌ ERROR: No se encontraron colores HEX válidos en el código CSS proporcionado. Se utilizará la paleta '1. Ejecutivo Clásico' por defecto.")
                     colores_activos = paletas_preset["1. Ejecutivo Clásico"]
                 else:
                     hex_limpios = [f"#{h[:6].lower()}" for h in hex_brutos]
-                    colores_activos = list(dict.fromkeys(hex_limpios))
-                    print(f"✅ ¡Código CSS procesado con éxito! ({len(colores_activos)} colores extraídos)")
+                    colores_activos = list(dict.fromkeys(hex_limpios)) # Eliminar duplicados manteniendo orden
+                    print(f"✅ ¡Código CSS procesado con éxito! Se extrajeron {len(colores_activos)} colores únicos.")
 
-        # Aplicar colores a Seaborn
+        # Aplicar configuración visual a Seaborn y Matplotlib
         sns.set_theme(style="whitegrid")
         sns.set_palette(colores_activos)
         plt.rcParams['figure.figsize'] = (12, 6)
 
-        # Validar existencia del DataFrame 'df' del 4.2
+        # Validar existencia del DataFrame 'df' del apartado 4.2
         if 'df' not in globals():
             print("❌ ERROR CRÍTICO: No se encuentra el DataFrame 'df'. Asegúrate de ejecutar primero el apartado 4.2.")
             return
 
+        print("\n📊 Generando visualizaciones analíticas con la paleta seleccionada...")
+
         # --- Gráfico 1: Market Share Trends ---
-        print("\n📊 Generando visualizaciones con la paleta seleccionada...")
         plt.figure()
         pivot_trends = df.pivot(index='year', columns='partner_country', values='trade_value_usd').fillna(0)
         market_share = pivot_trends.div(pivot_trends.sum(axis=1), axis=0) * 100
@@ -309,11 +331,13 @@ def al_hacer_clic_generar(b):
 
 boton_generar.on_click(al_hacer_clic_generar)
 
-# Mostrar la interfaz del apartado 4.5
+# Mostrar la interfaz completa en Google Colab
 ui_completa = widgets.VBox([
-    widgets.HTML("<h3>🎨 Sección 4.5: Selección de Paleta y Gráficos Analíticos</h3>"),
+    widgets.HTML("<h3>🎨 Sección 4.5: Selección de Paleta y Gráficos Analíticos (MSA)</h3>"),
+    widgets.HTML("<p>Selecciona una paleta predeterminada o introduce código CSS personalizado:</p>"),
     selector_paleta, 
     input_css, 
+    widgets.HTML("<br>"),
     boton_generar, 
     output_graficos
 ])
